@@ -37,22 +37,30 @@ class Localizer:
             J = int(np.log(self.N))
         self.J = J
         
-        self.wavelets = [np.eye(self.N)]
-        P_j = self.P
+        I = np.eye(self.N)
+        self.wavelets = [I]
+        P_j = np.linalg.matrix_power(self.P,2)
         
         print("Calculating Wavelets Using J = " + str(J))
-        for i in tqdm(range(1,J)):
-            
-            P_j = np.linalg.matrix_power(P_j,2)
-            if use_reduced:
-                Psi_j = column_subset(P_j,epsilon)
-            else:
-                Psi_j = P_j
-            
-            self.wavelets += [Psi_j]
+        
+        if use_reduced:
+            Psi_j_tilde = column_subset(I-P_j, epsilon=1e-3)
+            self.wavelets += [Psi_j_tilde]
+            for i in tqdm(range(2,J)):
+                P_j_new = np.linalg.matrix_power(P_j,2)
+                Psi_j = P_j - P_j_new
+                P_j = P_j_new
+                self.wavelets += [column_subset(Psi_j,1e-3)]
+        else:
+            self.wavelets += [I-P_j]
+            for i in tqdm(range(2,J)):
+                P_j_new = np.linalg.matrix_power(P_j,2)
+                Psi_j = P_j - P_j_new
+                P_j = P_j_new
+                self.wavelets += [Psi_j]
     
     # locality measure
-    def GetLocality(self,signal):
+    def GetLocality(self,signal,n_coefs=50):
         
         if self.Precomputed == False:
             print("Flattening and Normalizing Wavelets")
@@ -79,6 +87,13 @@ class Localizer:
         
         print("Compiling Results")
         return np.sum(np.abs(omp.coef_)*self.weights)
+    
+    
+    def set_distances(self,D):
+        self.D = D
+        
+    def PairDist(self,s):
+        return 1/(np.sum(s))**2 * s.T@self.D@s
             
 def normalize(A):
     
