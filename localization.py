@@ -4,113 +4,91 @@ from scipy.linalg import qr
 from tqdm import tqdm
 from sklearn.linear_model import OrthogonalMatchingPursuit
 
-### CODE FOR GETTING LOCALIZATION MEASURE
+### say we have a signal s on a pygsp graph G, use would be like so: 
 
-def get_locality(wavelets,signal,n_coefs):
+# loc = Localizer(G)
+# loc.CalculateWavlets()
+# loc.GetLocality(s)
+
+class Localizer:
     
-    # input: wavelets - set of diffusion wavelets
-    # s - signal to estimate locality of
-    # n_coefs - number of coefficients for OMP 
+    # initialize with graph and calculate diffusion operator 
     
-    # output: a number which measures the spread of a signal in a given graph
-    
-    J = len(wavelets)
-    weights = []
-    scale = []
-    
-    print("generating weights")
-    for j in range(J):
-        n_j = (wavelets[j].shape[1])
-        weights += [2**(j)]*n_j
-        scale += [j]*n_j
+    def __init__(self,G):
+        self.G = G
+        self.P = self.DiffusionOperator()
+        self.N = G.N
+        self.Precomputed = False
         
-    print("Normalizing Wavelets")
-    all_wavs = wavelets[0]
-    for j in range(1,J):
-        all_wavs = np.hstack((all_wavs,wavelets[j]))
+    # calculate lazy random walk matrix
+    def DiffusionOperator(self):
+        N = self.G.N
+        A = self.G.A
+        Dmin1 = np.diag([1/np.sum(row) for row in A])
+        P = 1/2 * (np.eye(N)+A@Dmin1)
+        return P
+    
+    # calculate wavelets 
+    def CalculateWavelets(self,use_reduced=False,J=-1,epsilon=1e-3):
         
+        # assert(self.P)
         
-    omp = OrthogonalMatchingPursuit(n_nonzero_coefs=n_coefs, normalize=False)
+        if J == -1:
+            J = int(np.log(self.N))
+        self.J = J
+        
+        self.wavelets = [np.eye(self.N)]
+        P_j = self.P
+        
+        print("Calculating Wavelets Using J = " + str(J))
+        for i in tqdm(range(1,J)):
+            
+            P_j = np.linalg.matrix_power(P_j,2)
+            if use_reduced:
+                Psi_j = column_subset(P_j,epsilon)
+            else:
+                Psi_j = P_j
+            
+            self.wavelets += [Psi_j]
     
-    localization = []
-    signal = signal.reshape(len(signal),1)
+    # locality measure
+    def GetLocality(self,signal,n_coefs=50):
+        
+        if self.Precomputed == False:
+            print("Flattening and Normalizing Wavelets")
+            
+            ncols = [self.wavelets[i].shape[1] for i in range(self.J)]
+            TOT = np.sum(ncols)
+            
+            self.FlatWaves = np.zeros((self.N,TOT))
+            self.weights = []
+            curr = 0
+            
+            for j in tqdm(range(self.J)):
+                normalized_j = normalize(self.wavelets[j])
+                last = curr + ncols[j]
+                self.FlatWaves[:,curr:last] = normalized_j
+                self.weights += [2**(j)]*self.wavelets[j].shape[1]
+                curr = last
+            self.Precomputed = True
+            
+        print("Calculating Matching Pursuit")
+        omp = OrthogonalMatchingPursuit(tol = 1e-3, normalize=True)
+        signal = signal/np.linalg.norm(signal)
+        omp.fit(self.FlatWaves,signal)
+        
+        print("Compiling Results")
+        return np.sum(np.abs(omp.coef_)*self.weights)
+            
+def normalize(A):
     
-    print("Calculating OMP")
-    for j in tqdm(range(signal.shape[1])):
-        sig = signal[:,j]
-        omp.fit(all_wavs,sig/np.linalg.norm(sig))
-        coef = omp.coef_
-        localization += [np.sum(coef*weights)]
+    # helper function 
+    # Input A : an n x m matrix 
+    # Output A, but with each column divided by its L2 norm
     
-    # plt.bar(range(J),dist)
-    # plt.show()
-    
-    return localization
-
-
-### CODE FOR GETTING HEAT WAVES 
-
-## MAIN FUNCTION: TAKES INPUT GRAPH G AND OUTPUTS ARRAY OF WAVES AT VARIOUS SCALES
-
-def get_waves(G,epsilon=1e-3,use_reduced=False):
-    
-    # Input: 
-    # G - a pygsp graph 
-    # epsilon - tolerance for column reduction
-    # use_reduced - dictates whether or not we use a QR decomposition to select a subset 
-    # of the columns
-    
-    # Output: a J x n x ? matrix of diffusion wavelets, where ? depends on whether or not we reduce the number of cols
-    
-    J = int(np.log(G.N))
-    print("Calculating Walk Matrix:")
-    T = lazy_walk(G)
-    
-    print("Calculating Wavelets:")
-    if use_reduced:
-        return reduced_wavelets(T,J,epsilon)
-    else:
-        return all_wavelets(T,J)
-    
-### FIRST OPTION - RETURN ALL DIFFUSED DISTRIBUTIONS AT EVERY SCALE
-    
-def all_wavelets(T,J):
-    
-    # Input: An n x n Diffusion operator T, number of scales J
-    # Ouput: a J x n x n matrix bank for which bank[j] = T^{2^j}
-    
-    N = T.shape[0]
-    I = np.eye(N)
-
-    bank = [I]
-    T_j = T
-    for j in tqdm(range(1,J)):
-        T_j = np.linalg.matrix_power(T_j,2)
-        bank += [T_j]
-    return bank
-
-### SECOND OPTION - CUT DOWN ON THE NUMBER OF COLUMNS
-
-def reduced_wavelets(T,J,epsilon):
-    
-    # Input: An n x n Diffusion operator T, number of scales J
-    # Ouput: a J x n x n matrix bank for which bank[j] = T^{2^j}
-    
-    N = T.shape[0]
-    I = np.eye(N)
-    bank = [I]
-    
-    P_j = T
-    
-    for j in tqdm(range(1,J)):
-        print("Calculating Scale " + str(j) + " wavelets:")
-        P_j = np.linalg.matrix_power(P_j,2)
-        Psi_j_r = column_subset(P_j,epsilon)
-        bank += [Psi_j_r]
-        print("Used " + str(Psi_j_r.shape[1]) + " columns")
-    return bank
-
-### GETTING FEWER COLUMNS 
+    for i in range(A.shape[1]):
+        A[:,i]=A[:,i]/np.linalg.norm(A[:,i])
+    return A
 
 def column_subset(A,epsilon):
     
@@ -133,50 +111,4 @@ def column_subset(A,epsilon):
             return A_P[:,:i]
         
     return A_P
-
-### A FEW HELPER FUNCTIONS
-
-def normalize(A):
-    
-    # helper function 
-    # Input A : an n x m matrix 
-    # Output A, but with each column divided by its L2 norm
-    
-    for i in range(A.shape[1]):
-        A[:,i]=A[:,i]/np.linalg.norm(A[:,i])
-    return A
-
-def lazy_walk(G):
-    
-    # Input: pygsp graph G
-    # Output: The lazy diffusion operator P = 1/2(I + AD^{-1})
-    
-    A = G.A
-    N = A.shape[0]
-    D = [np.sum(row) for row in A]
-    Dmin1 = np.diag([1/d for d in D])
-    M = A@Dmin1
-    P = 1/2 * (np.eye(N) + M)
-    return P
-
-
-## OLD CODE 
-def all_wavelets_OLD(T,J):
-    
-    # Input: An n x n Diffusion operator T, number of scales J
-    # Ouput: a J x n x n matrix bank for which bank[j] = T^{2^{j-1}}-T^{2^j}
-    
-    N = T.shape[0]
-    I = np.eye(N)
-    bank = np.zeros((J,N,N))
-    bank[0] = I.reshape(1,N,N)
-    bank[1] = (I-T).reshape(1,N,N)
-    T_j = T
-    for j in range(2,J):
-        T_j_p1 = T_j@T_j
-        new_wavs = T_j - T_j_p1
-        bank[j] = new_wavs
-        T_j = T_j_p1
-    return bank
-
-
+        
