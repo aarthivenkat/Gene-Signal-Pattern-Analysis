@@ -52,7 +52,7 @@ class Localizer:
             self.wavelets += [Psi_j]
     
     # locality measure
-    def GetLocality(self,signal,n_coefs=50):
+    def GetLocality(self,signal):
         
         if self.Precomputed == False:
             print("Flattening and Normalizing Wavelets")
