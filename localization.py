@@ -3,6 +3,8 @@ from pygsp import graphs, filters, plotting
 from scipy.linalg import qr
 from tqdm import tqdm
 from sklearn.linear_model import OrthogonalMatchingPursuit
+import phate
+from scipy.spatial.distance import pdist, squareform
 
 ### say we have a signal s on a pygsp graph G, use would be like so: 
 
@@ -19,6 +21,7 @@ class Localizer:
         self.P = self.DiffusionOperator()
         self.N = G.N
         self.Precomputed = False
+        self.calculated_D = False
         
     # calculate lazy random walk matrix
     def DiffusionOperator(self):
@@ -44,7 +47,8 @@ class Localizer:
         print("Calculating Wavelets Using J = " + str(J))
         
         if use_reduced:
-            Psi_j_tilde = column_subset(I-P_j, epsilon=1e-3)
+            assert(self.N < 3000)
+            Psi_j_tilde = column_subset(I-P_j, epsilon=epslion)
             self.wavelets += [Psi_j_tilde]
             for i in tqdm(range(2,J)):
                 P_j_new = np.linalg.matrix_power(P_j,2)
@@ -58,12 +62,26 @@ class Localizer:
                 Psi_j = P_j - P_j_new
                 P_j = P_j_new
                 self.wavelets += [Psi_j]
-    
+
+    def randomize_and_reduce(self,epsilon, C):
+        self.delta = np.random.randint(0,self.wavelets[0].shape[1], C)
+        for j in tqdm(range(self.J)):
+            self.wavelets[j] = self.wavelets[j][self.delta][:,self.delta]
+            self.wavelets[j] = column_subset(self.wavelets[j],epsilon)
+            
     # locality measure
     def GetLocality(self,signal,n_coefs=50):
         
         if self.Precomputed == False:
             print("Flattening and Normalizing Wavelets")
+            
+            if self.N > 3000:
+                print("too many vertices. Clipping to 3000")
+                self.randomize_and_reduce(1e-3,3000)
+                self.N = 3000
+                self.reduced = True
+            else:
+                self.reduced = False
             
             ncols = [self.wavelets[i].shape[1] for i in range(self.J)]
             TOT = np.sum(ncols)
@@ -78,21 +96,43 @@ class Localizer:
                 self.FlatWaves[:,curr:last] = normalized_j
                 self.weights += [2**(j)]*self.wavelets[j].shape[1]
                 curr = last
+                
             self.Precomputed = True
             
         print("Calculating Matching Pursuit")
         omp = OrthogonalMatchingPursuit(tol = 1e-3, normalize=True)
+        
+        if self.reduced:
+            signal = signal[self.delta]
+            
         signal = signal/np.linalg.norm(signal)
         omp.fit(self.FlatWaves,signal)
         
         print("Compiling Results")
-        return np.sum(np.abs(omp.coef_)*self.weights)
-    
-    
+        coef = omp.coef_ * omp.coef_
+        return np.sum(coef*self.weights)
+      
+    def calculate_D(self,method = "phate"):
+        if method == "phate":
+            phate_op = phate.PHATE(random_state = 0,verbose=False)
+            _ = phate_op.fit(self.G)
+            t = phate_op._find_optimal_t()
+            log_P_to_t = np.log(np.linalg.matrix_power(self.P,t))
+            self.D = squareform(pdist(log_P_to_t))
+            self.calculated_D = True
+        else:
+            raise NameError ("Only Supports Phate or Manual Distance at the Moment")
+        
     def set_distances(self,D):
         self.D = D
+        self.calculated_D = True
         
     def PairDist(self,s):
+        s = s.reshape(-1,1)
+            
+        if self.calculated_D is  False:
+            self.calculate_D()
+            
         return 1/(np.sum(s))**2 * s.T@self.D@s
             
 def normalize(A):
@@ -111,14 +151,14 @@ def column_subset(A,epsilon):
     # Output: A subset of A's columns s.t. the projection of A into these columns 
     # can approximate A with error < epsilon |A|_2
     
-    Q,R,P = qr(A,pivoting=True)
+    R,P = qr(A,pivoting=True,mode='r')
     A_P = A[:,P]
     
     A_nrm = np.sum(A*A)
     tol = epsilon*A_nrm
     R_nrm = 0
     
-    for i in tqdm(range(0,A.shape[1])):
+    for i in tqdm(range(0,R.shape[0])):
         R_nrm += np.sum(R[i]*R[i])
         err = A_nrm-R_nrm
         if err < tol:
@@ -126,4 +166,3 @@ def column_subset(A,epsilon):
             return A_P[:,:i]
         
     return A_P
-        
